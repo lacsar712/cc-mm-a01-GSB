@@ -6,7 +6,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import DateTime, Float, String, create_engine
+from sqlalchemy import DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.rules import classify
@@ -42,6 +42,18 @@ class Reading(Base):
     note: Mapped[str] = mapped_column(String(200))
     created_by: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PushAudit(Base):
+    """推送审计：报警班测每推一次落一条，正文为推送时刻快照，事后不改写。"""
+
+    __tablename__ = "push_audits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    site: Mapped[str] = mapped_column(String(80))
+    ch4_pct: Mapped[float] = mapped_column(Float)
+    online_sockets: Mapped[int] = mapped_column(Integer)
+    pushed_by: Mapped[str] = mapped_column(String(64))
+    pushed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class LoginIn(BaseModel):
@@ -143,6 +155,7 @@ def list_readings(_user: dict = Depends(current_user)):
 @app.post("/api/readings", status_code=201)
 async def create_reading(body: ReadingIn, user: dict = Depends(require_writer)):
     level, note = classify(body.ch4_pct)
+    pushed_at = datetime.now(timezone.utc)
     db = SessionLocal()
     try:
         row = Reading(
@@ -151,12 +164,33 @@ async def create_reading(body: ReadingIn, user: dict = Depends(require_writer)):
             level=level,
             note=note,
             created_by=user["username"],
-            created_at=datetime.now(timezone.utc),
+            created_at=pushed_at,
         )
         db.add(row)
+        audit_id = None
+        if level == "报警":
+            # 推送前清点在线套接字；审计正文在此定格，之后不再改写
+            audit = PushAudit(
+                site=row.site,
+                ch4_pct=row.ch4_pct,
+                online_sockets=len(sockets),
+                pushed_by=user["username"],
+                pushed_at=pushed_at,
+            )
+            db.add(audit)
         db.commit()
         db.refresh(row)
-        payload = {"id": row.id, "site": row.site, "ch4_pct": row.ch4_pct, "level": row.level, "note": row.note}
+        if level == "报警":
+            db.refresh(audit)
+            audit_id = audit.id
+        payload = {
+            "id": row.id,
+            "site": row.site,
+            "ch4_pct": row.ch4_pct,
+            "level": row.level,
+            "note": row.note,
+            "push_audit_id": audit_id,
+        }
     finally:
         db.close()
     dead = []
@@ -168,6 +202,29 @@ async def create_reading(body: ReadingIn, user: dict = Depends(require_writer)):
     for ws in dead:
         sockets.discard(ws)
     return payload
+
+
+@app.get("/api/push-audits")
+def list_push_audits(site: str | None = None, _user: dict = Depends(current_user)):
+    db = SessionLocal()
+    try:
+        query = db.query(PushAudit)
+        if site and site.strip():
+            query = query.filter(PushAudit.site == site.strip())
+        rows = query.order_by(PushAudit.id.desc()).all()
+        return [
+            {
+                "id": a.id,
+                "site": a.site,
+                "ch4_pct": a.ch4_pct,
+                "online_sockets": a.online_sockets,
+                "pushed_by": a.pushed_by,
+                "pushed_at": a.pushed_at.isoformat(),
+            }
+            for a in rows
+        ]
+    finally:
+        db.close()
 
 
 @app.websocket("/ws/alerts")
