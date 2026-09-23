@@ -1,12 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
-from sqlalchemy import DateTime, Float, String, create_engine
+from sqlalchemy import DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from app.rules import classify
@@ -42,6 +42,20 @@ class Reading(Base):
     note: Mapped[str] = mapped_column(String(200))
     created_by: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PushAudit(Base):
+    """推送审计：只追加，不提供改/删接口。浓度为上报当时的快照，
+    即便事后改正班测浓度，审计正文也不改写。"""
+
+    __tablename__ = "push_audits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    reading_id: Mapped[int] = mapped_column(Integer)
+    site: Mapped[str] = mapped_column(String(80))
+    ch4_pct: Mapped[float] = mapped_column(Float)
+    level: Mapped[str] = mapped_column(String(20))
+    pushed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    online_sockets: Mapped[int] = mapped_column(Integer)
 
 
 class LoginIn(BaseModel):
@@ -143,6 +157,7 @@ def list_readings(_user: dict = Depends(current_user)):
 @app.post("/api/readings", status_code=201)
 async def create_reading(body: ReadingIn, user: dict = Depends(require_writer)):
     level, note = classify(body.ch4_pct)
+    pushed_at = datetime.now(timezone.utc)
     db = SessionLocal()
     try:
         row = Reading(
@@ -151,12 +166,26 @@ async def create_reading(body: ReadingIn, user: dict = Depends(require_writer)):
             level=level,
             note=note,
             created_by=user["username"],
-            created_at=datetime.now(timezone.utc),
+            created_at=pushed_at,
         )
         db.add(row)
         db.commit()
         db.refresh(row)
         payload = {"id": row.id, "site": row.site, "ch4_pct": row.ch4_pct, "level": row.level, "note": row.note}
+        # 达到报警线才落推送审计；浓度等正文是此刻快照，之后不改写
+        online = len(sockets)
+        if level == "报警":
+            db.add(
+                PushAudit(
+                    reading_id=row.id,
+                    site=row.site,
+                    ch4_pct=row.ch4_pct,
+                    level=row.level,
+                    pushed_at=pushed_at,
+                    online_sockets=online,
+                )
+            )
+            db.commit()
     finally:
         db.close()
     dead = []
@@ -168,6 +197,30 @@ async def create_reading(body: ReadingIn, user: dict = Depends(require_writer)):
     for ws in dead:
         sockets.discard(ws)
     return payload
+
+
+@app.get("/api/push-audits")
+def list_push_audits(site: str | None = Query(default=None, max_length=80), _user: dict = Depends(current_user)):
+    db = SessionLocal()
+    try:
+        q = db.query(PushAudit)
+        if site and site.strip():
+            q = q.filter(PushAudit.site == site.strip())
+        rows = q.order_by(PushAudit.id.desc()).all()
+        return [
+            {
+                "id": r.id,
+                "reading_id": r.reading_id,
+                "site": r.site,
+                "ch4_pct": r.ch4_pct,
+                "level": r.level,
+                "pushed_at": r.pushed_at.isoformat(),
+                "online_sockets": r.online_sockets,
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
 
 
 @app.websocket("/ws/alerts")

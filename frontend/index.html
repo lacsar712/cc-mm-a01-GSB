@@ -6,6 +6,8 @@
   <style>
     body { font-family: sans-serif; margin: 0; background: #1c1917; color: #f5f5f4; }
     header { display: flex; gap: 12px; align-items: center; padding: 12px 20px; background: #44403c; }
+    nav { display: flex; gap: 6px; margin-left: 8px; }
+    nav button { padding: 4px 12px; }
     main { max-width: 760px; margin: 20px auto; padding: 0 12px; }
     input, button { padding: 8px; margin-right: 8px; }
     .alarm { color: #fca5a5; } .ok { color: #86efac; }
@@ -17,6 +19,10 @@
 <body>
   <header>
     <strong>矿井瓦斯班测台</strong>
+    <nav>
+      <button id="nav-board">班测</button>
+      <button id="nav-audit">推送审计</button>
+    </nav>
     <span id="who"></span>
     <button id="out" hidden>退出</button>
   </header>
@@ -29,13 +35,28 @@
       <p>gasman / gas123456 可上报；viewer / view123456 只能看</p>
     </section>
     <section id="app" hidden>
-      <p id="live">等待推送</p>
-      <form id="form">
-        <input id="site" placeholder="测点" />
-        <input id="ch4" type="number" step="0.01" placeholder="甲烷 %" />
-        <button>上报</button>
-      </form>
-      <table><thead><tr><th>测点</th><th>甲烷 %</th><th>状态</th><th>说明</th></tr></thead><tbody id="rows"></tbody></table>
+      <div id="view-board">
+        <p id="live">等待推送</p>
+        <form id="form">
+          <input id="site" placeholder="测点" />
+          <input id="ch4" type="number" step="0.01" placeholder="甲烷 %" />
+          <button>上报</button>
+        </form>
+        <table><thead><tr><th>测点</th><th>甲烷 %</th><th>状态</th><th>说明</th></tr></thead><tbody id="rows"></tbody></table>
+      </div>
+      <div id="view-audit" hidden>
+        <p>每条达到报警线的推送在此留痕，浓度为推送当时的快照，事后不改写。</p>
+        <form id="audit-filter">
+          <input id="audit-site" placeholder="按测点收窄，如 回风巷" />
+          <button>查询</button>
+          <button type="button" id="audit-clear">全部</button>
+        </form>
+        <table>
+          <thead><tr><th>测点</th><th>甲烷 %</th><th>状态</th><th>推送时刻</th><th>在线套接字</th></tr></thead>
+          <tbody id="audit-rows"></tbody>
+        </table>
+        <p id="audit-empty" hidden>该测点暂无推送审计</p>
+      </div>
     </section>
   </main>
   <script src="/app.js"></script>
